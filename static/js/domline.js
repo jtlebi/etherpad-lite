@@ -160,6 +160,10 @@ domline.createDomLine = function(nonEmpty, doesWrap, optBrowser, optDocument)
     {
       if (href)
       {
+        if(!~href.indexOf("http")) // if the url doesn't include http or https etc prefix it.
+        {
+          href = "http://"+href;
+        }
         extraOpenTags = extraOpenTags + '<a href="' + href.replace(/\"/g, '&quot;') + '">';
         extraCloseTags = '</a>' + extraCloseTags;
       }
