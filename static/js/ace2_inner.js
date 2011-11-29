@@ -5256,7 +5256,38 @@ function OUTER(gscope)
     }
     setLineListTypes(mods);
   }
+  
+  function doInsertOrderedList()
+  {
+    if (!(rep.selStart && rep.selEnd))
+    {
+      return;
+    }
+
+    var firstLine, lastLine;
+    firstLine = rep.selStart[0];
+    lastLine = Math.max(firstLine, rep.selEnd[0] - ((rep.selEnd[1] == 0) ? 1 : 0));
+
+    var allLinesAreList = true;
+    for (var n = firstLine; n <= lastLine; n++)
+    {
+      if (!getLineListType(n))
+      {
+        allLinesAreList = false;
+        break;
+      }
+    }
+
+    var mods = [];
+    for (var n = firstLine; n <= lastLine; n++)
+    {
+      var t = getLineListType(n);
+      mods.push([n, allLinesAreList ? '' : (t ? t : 'number1')]);
+    }
+    setLineListTypes(mods);
+  }
   editorInfo.ace_doInsertUnorderedList = doInsertUnorderedList;
+  editorInfo.ace_doInsertOrderedList = doInsertOrderedList;
 
   var mozillaFakeArrows = (browser.mozilla && (function()
   {

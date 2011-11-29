@@ -94,9 +94,17 @@ domline.createDomLine = function(nonEmpty, doesWrap, optBrowser, optDocument)
         listType = listType[1];
         if (listType)
         {
-          preHtml = '<ul class="list-' + listType + '"><li>';
-          postHtml = '</li></ul>';
-        }
+          if(listType.slice(0, 6) == "bullet")
+          {
+            preHtml = '<ul class="list-' + listType + '"><li>';
+            postHtml = '</li></ul>';
+          } 
+          else if(listType.slice(0, 6) == "number")
+          {
+            preHtml = '<ol class="list-' + listType + '"><li>';
+            postHtml = '</li></ol>';
+          }
+       }
         result.lineMarker += txt.length;
         return; // don't append any text
       }
