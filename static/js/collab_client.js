@@ -24,10 +24,47 @@ var chat = require('/chat').chat;
 
 // Dependency fill on init. This exists for `pad.socket` only.
 // TODO: bind directly to the socket.
+
 var pad = undefined;
 function getSocket() {
-  return pad && pad.socket;
+  console.log("DEPRECATED: getSocket()");
+  return socket;
 }
+
+/* Channel state list:
+ *  - CONNECTED    => The client is fully functionnal
+ *  - DISCONNECTED => Connection has been definitively lost. Initial state.
+ *  - CONNECTING   => The connection is establishing
+ *  - RECONNECTING => Connection has been lost but not all hope :)
+ *  - RECONNECTED  => Intermediate state between RECONNECTING and CONNECTED
+ *
+ * Transitions:
+ *  - DISCONNECTED -> CONNECTING   => Trying to open initial connection
+ *  - CONNECTING   -> CONNECTED    => Initial connexion established
+ *  - CONNECTED    -> RECONNECTING => The connection has been lost. Try recover
+ *  - CONNECTED    -> DISCONNECTED => The connection has been lost. Give up
+ *  - RECONNECTING -> RECONNECTED  => The connection has been recovered
+ *  - RECONNECTED  -> CONNECTED    => Connection fully recovered, including pending messages
+ */
+ 
+/* Commit state list:
+ *  - IDLE      => Changeset connection is idle and allright
+ *  - COMMITING => A chaneset is being commited
+ *
+ * Transitions:
+ *  - DISCONNECTED -> CONNECTING   => Trying to open initial connection
+ * 
+ * Please note that ther is a strong link between "commit state" and "channel state"
+ *  - No commit unless channel state == CONNECTED
+ *  - Move to DISCONNECT state in case of error situation
+ */
+ 
+/*
+ * Low level protocol: (very basic)
+ *  - Handshake => client/server sync. Done by Socket.io
+ *  - Notify Ready => Done right after the connection has been established
+ *  - Actual work !
+ */
 
 /** Call this when the document is ready, and a new Ace2Editor() has been created and inited.
     ACE's ready callback does not need to have fired yet.
@@ -100,17 +137,278 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
   editor.setProperty("userAuthor", userId);
   editor.setBaseAttributedText(serverVars.initialAttributedText, serverVars.apool);
   editor.setUserChangeNotificationCallback(wrapRecordingErrors("handleUserChanges", handleUserChanges));
-
+  
+  //FIXME: should be moved to an "util" file
   function dmesg(str)
   {
+    console.log("dmesg called !");
     if (typeof window.ajlog == "string") window.ajlog += str + '\n';
     debugMessages.push(str);
   }
+  
+  /* BEGIN SOCKET HANDLING */
+  
+  //this Function gandles the whole socket life cycle. Cf doc at the top
+  function Connection()
+  {
+    //FIXME: move these to global timeouts constants
+    //constants
+    var max_delay_between_connection_attempts = 1000*60;//1 min
+    var max_connection_attempt_count = 40;//40 attempts before moving to disconnect
+    
+    //var internal status
+    var socket;
+    var channelState = "CONNECTING";
+    
+    //callbacks. One per state.
+    var callbacks = {
+      onStateConnected:    function(prevState) {},
+      onStateDisconnected: function(prevState) {},
+      onStateConnecting:   function(prevState) {},
+      onStateReconnecting: function(prevState, nextDelay, attemptsCount) {},//very nice for the UI
+      onStateReconnected:  function(prevState) {},
+      onMessage:           function(obj)       {}
+    };
+    
+    //utils
+    
+    function getResource()
+    {
+      //get the page URL
+      var loc = document.location;
+      //get the correct port
+      var port = loc.port == "" ? (loc.protocol == "https:" ? 443 : 80) : loc.port;
+      //create the url
+      var url = loc.protocol + "//" + loc.hostname + ":" + port + "/";
+      //find out in which subfolder we are
+      var resource = loc.pathname.substr(1, loc.pathname.indexOf("/p/")) + "socket.io";
+      
+      return resource;
+    }
+    
+    // Launch actual connection
+    channelState = "CONNECTING";
+    socket = io.connect(url, {
+      resource: getResource(),
+      'reconnection limit': max_delay_between_connection_attempts,
+      'max reconnection attempts': max_connection_attempt_count,
+      'sync disconnect on unload' : false
+    });
+  
+    
+    // Internal callbacks
+    //event doc here: https://github.com/LearnBoost/socket.io-client
+    socket.on('connect', function () {
+      console.log("Event: connect. prevstate = "+channelState);
+      prevState = channelState;
+      if(prevState == "DISCONNECTED")
+      {
+        channelState = "CONNECTED";
+        callbacks.onStateConnected(prevState);//todo handle sendClientReady here
+      }
+      else
+      {
+        console.log("BIG ERROR CONDITION");
+      }
+    });
+    
+    socket.on('reconnect', function () {
+      console.log("Event: connect. prevstate = "+channelState);
+      prevState = channelState;
+      if(prevState == "RECONNECTING")
+      {
+        channelState = "RECONNECTED";
+        callbacks.onStateReconnected(prevState);//todo handle sendClientReady here
+        channelState = "CONNECTED";
+        callbacks.onStateConnected("RECONNECTED");
+      }
+      else
+      {
+        console.log("BIG ERROR CONDITION");
+      }
+    });
+    
+    socket.on('reconnecting', function (nextDelay, attemptsCount) {
+      console.log("Event: connect. prevstate = "+channelState);
+      prevState = channelState;
+      if(prevState == "RECONNECTING" || prevState == "CONNECTED")
+      {
+        //fixme: check taht list of previous state is OK
+        channelState = "RECONNECTING";
+        callbacks.onStateReconnecting(prevState, nextDelay, attemptsCount);
+      }
+      else
+      {
+        console.log("BIG ERROR CONDITION");
+      }
+    });
+    
+    socket.on('connect_failed', function () {
+      console.log("Event: connect. prevstate = "+channelState);
+      prevState = channelState;
+      if(prevState == "RECONNECTING" || prevState == "CONNECTING")
+      {
+        channelState = "DISCONNECTED";
+        callbacks.onStateDisconnected(prevState);
+      }
+      else
+      {
+        console.log("BIG ERROR CONDITION");
+      }
+    });
+  
+    socket.on('message', function(obj) {
+      console.log("Event: message. prevstate = "+channelState);
+      callbacks.onMessage(obj);
+    });
+    
+    // Public API
+    this.registerCallback = function(name, cb)
+    {
+      callbacks[name] = cb;
+    }
+    
+    this.forceDisconnect = function()
+    {
+      socket.disconnect();
+      channelState = "DISCONNECTED";
+      callbacks.onStateDisconnected(prevState);
+    }
+    
+    this.jsonSend = function(obj)
+    {
+      socket.json.send(obj);//TODO: state detection
+    }
+    
+    // Bind the colorpicker
+    //FIXME: PUT THAT PIECE OF CODE SOMEWHERE. IT IS VALID !
+    //var fb = $('#colorpicker').farbtastic({ callback: '#mycolorpickerpreview', width: 220});
+  }
+  
+  /* END SOCKET HANDLING */
+  
+  /* BEGIN  HANDLING */
+  
+  //Handles all the protocol logic and the interractions with the connection
+  function Protocol(connection)
+  {
+    //utils
+    function getPadId()
+    {
+      var padId = document.location.pathname.substring(document.location.pathname.lastIndexOf("/") + 1);
+      padId = decodeURIComponent(padId); // unescape neccesary due to Safari and Opera interpretation of spaces
+      return padId;
+    }
+    
+    //internal API
+    function sendMessage(msg)
+    {
+      connection.jsonSend({
+        type: "COLLABROOM",
+        component: "pad",
+        data: msg
+      });
+    }
+    
+    function sendClientReady(isReconnect)
+    {
+      var padId = getPadId();
+      
+      if(!isReconnect)
+        document.title = padId.replace(/_+/g, ' ') + " | " + document.title;
+  
+      var token = readCookie("token");      
+      var sessionID = readCookie("sessionID");
+      var password = readCookie("password");
+      
+      if (token == null)
+      {
+        token = "t." + randomString();
+        createCookie("token", token, 60);
+      }
+  
+      var msg = {
+        "component": "pad",
+        "type": "CLIENT_READY",
+        "padId": padId,
+        "sessionID": sessionID,
+        "password": password,
+        "token": token,
+        "protocolVersion": 2
+      };
+      
+      //this is a reconnect, lets tell the server our revisionnumber
+      if(isReconnect == true)
+      {
+        msg.client_rev=pad.collabClient.getCurrentRevisionNumber();
+        msg.reconnect=true;
+      }
+      
+      console.log("sending CLIENT_READY =>");
+      console.log(msg);
+      connection.jsonSend(msg);
+    }
+    
+    //internal callbacks
+    function onStateConnected(prevState)
+    {
+      //
+    }
+    
+    function onStateDisconnected(prevState)
+    {
+      //
+    }
+    
+    function onStateConnecting(prevState)
+    {
+      //
+    }
+    
+    function onStateReconnecting(prevState, nextDelay, attemptsCount)
+    {
+      //
+    }
+    
+    function onStateReconnected(prevState)
+    {
+      //
+    }
+    
+    function onMessage(obj)
+    {
+      //
+    }
+    
+    //register callbacks
+    connection.registerCallback("onStateConnected", onStateConnected);
+    connection.registerCallback("onStateDisconnected", onStateDisconnected);
+    connection.registerCallback("onStateConnecting", onStateConnecting);
+    connection.registerCallback("onStateReconnecting", onStateReconnecting);
+    connection.registerCallback("onStateReconnected", onStateReconnected);
+    connection.registerCallback("onMessage", onMessage);
 
+  }
+
+  /* END PROTOCOL HANDLING */
+  
+  //Client construction. I love clean and short code :)
+  connection = new Connection();
+  protocol = new Protocol(connection);
+
+  
+  
+  // Ran every 3 sec or so. It is responsible for fetching user changes from the 
+  // Changeset library and commiting it to the server. It also handles connection 
+  // Failure situations
+  // Its is very important to notice this "poll" mode
+  //  -> prevents server flooding
+  //  -> keeps a good isolation with chanset lib
   function handleUserChanges()
   {
     if ((!getSocket()) || channelState == "CONNECTING")
     {
+      //max *initial* connection delay = 20s
       if (channelState == "CONNECTING" && (((+new Date()) - initialStartConnectTime) > 20000))
       {
         setChannelState("DISCONNECTED", "initsocketfail");
@@ -127,6 +425,7 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
 
     if (state != "IDLE")
     {
+      // Commit timeout: 20s 
       if (state == "COMMITTING" && (t - lastCommitTime) > 20000)
       {
         // a commit is taking too long
@@ -175,7 +474,9 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
       setTimeout(wrapRecordingErrors("setTimeout(handleUserChanges)", handleUserChanges), 3000);
     }
   }
-
+  
+  /* Public collab_client API */
+  
   function getStats()
   {
     var stats = {};
@@ -187,6 +488,8 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
     return stats;
   }
 
+  /*
+  var hiccupCount = 0;
   function setUpSocket()
   {
     hiccupCount = 0;
@@ -195,8 +498,6 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
 
     initialStartConnectTime = +new Date();
   }
-
-  var hiccupCount = 0;
 
   function handleCometHiccup(params)
   {
@@ -216,31 +517,10 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
       hiccupCount = 0;
       setChannelState("CONNECTED");
     }
-  }
+  }*/
   
-  function sendMessage(msg)
-  {
-    getSocket().json.send(
-    {
-      type: "COLLABROOM",
-      component: "pad",
-      data: msg
-    });
-  }
-  
-  function _sendMessage(msg)
-  {
-    console.log("sending msg =>");
-    console.log(msg);
+  /* Collab_Client utils */
     
-    getSocket().json.send(
-    {
-      type: "COLLABROOM",
-      component: "pad",
-      data: msg
-    });
-  }
-  
   function wrapRecordingErrors(catcher, func)
   {
     return function()
@@ -270,7 +550,8 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
     { /*absorb*/
     }
   }
-
+  
+  //todo: move to protocol
   function handleMessageFromServer(evt)
   {
     if (window.console) console.log(evt);
@@ -374,7 +655,8 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
       callbacks.onServerMessage(msg.payload);
     }
   }
-
+  
+  //local api
   function updateUserInfo(userInfo)
   {
     userInfo.userId = userId;
@@ -388,11 +670,14 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
     });
   }
 
+  //should not be in this file...
+  //go to ace or pad with a callback
   function tellAceActiveAuthorInfo(userInfo)
   {
     tellAceAuthorInfo(userInfo.userId, userInfo.colorId);
   }
-
+  
+  //idem
   function tellAceAuthorInfo(userId, colorId, inactive)
   {
     if(typeof colorId == "number")
@@ -415,7 +700,8 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
       });
     }
   }
-
+  
+  //idem
   function fadeAceAuthorInfo(userInfo)
   {
     tellAceAuthorInfo(userInfo.userId, userInfo.colorId, true);
@@ -437,12 +723,14 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
       }
     }
   }
-
+  
+  //may be removed :)
   function dmesgUsers()
   {
     //pad.dmesg($.map(getConnectedUsers(), function(u) { return u.userId.slice(-2); }).join(','));
   }
 
+  //deprecated: remove
   function setChannelState(newChannelState, moreInfo)
   {
     if (newChannelState != channelState)
@@ -451,7 +739,8 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
       callbacks.onChannelStateChange(channelState, moreInfo);
     }
   }
-
+  
+  //utils.js
   function keys(obj)
   {
     var array = [];
@@ -461,7 +750,8 @@ function getCollabClient(ace2editor, serverVars, initialUserInfo, options, _pad)
     });
     return array;
   }
-
+  
+  //utils.js
   function valuesArray(obj)
   {
     var array = [];

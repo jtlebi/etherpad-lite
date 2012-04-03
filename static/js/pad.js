@@ -22,7 +22,7 @@
 
 /* global $, window */
 
-var socket;
+
 
 // These jQuery things should create local references, but for now `require()`
 // assigns to the global `$` and augments it with plugins.
@@ -151,185 +151,6 @@ function ieTestXMLHTTP(){
   if ($.browser.msie && !window.XMLHttpRequest){
     $("#editorloadingbox").html("You do not have XML HTTP enabled in your browser. <a target='_blank' href='https://github.com/Pita/etherpad-lite/wiki/How-to-enable-native-XMLHTTP-support-in-IE'>Fix this issue</a>");
   }
-}
-function handshake()
-{
-  var loc = document.location;
-  //get the correct port
-  var port = loc.port == "" ? (loc.protocol == "https:" ? 443 : 80) : loc.port;
-  //create the url
-  var url = loc.protocol + "//" + loc.hostname + ":" + port + "/";
-  //find out in which subfolder we are
-  var resource = loc.pathname.substr(1, loc.pathname.indexOf("/p/")) + "socket.io";
-  //connect
-  socket = pad.socket = io.connect(url, {
-    resource: resource,
-    'reconnection limit': 1000*60,
-    'max reconnection attempts': 40,
-    'sync disconnect on unload' : false
-  });
-
-  function sendClientReady(isReconnect)
-  {
-    var padId = document.location.pathname.substring(document.location.pathname.lastIndexOf("/") + 1);
-    padId = decodeURIComponent(padId); // unescape neccesary due to Safari and Opera interpretation of spaces
-
-    if(!isReconnect)
-      document.title = padId.replace(/_+/g, ' ') + " | " + document.title;
-
-    var token = readCookie("token");
-    if (token == null)
-    {
-      token = "t." + randomString();
-      createCookie("token", token, 60);
-    }
-    
-    var sessionID = readCookie("sessionID");
-    var password = readCookie("password");
-
-    var msg = {
-      "component": "pad",
-      "type": "CLIENT_READY",
-      "padId": padId,
-      "sessionID": sessionID,
-      "password": password,
-      "token": token,
-      "protocolVersion": 2
-    };
-    
-    //this is a reconnect, lets tell the server our revisionnumber
-    if(isReconnect == true)
-    {
-      msg.client_rev=pad.collabClient.getCurrentRevisionNumber();
-      msg.reconnect=true;
-    }
-    console.log("sending CLIENT_READY =>");
-    console.log(msg);
-    socket.json.send(msg);
-  };
-
-  var disconnectTimeout;
-
-  socket.once('connect', function () {
-    sendClientReady(false);
-  });
-  
-  socket.on('reconnect', function () {
-    //reconnect is before the timeout, lets stop the timeout
-    if(disconnectTimeout)
-    {
-      clearTimeout(disconnectTimeout);
-    }
-    sendClientReady(true);
-    pad.collabClient.setChannelState("CONNECTED");
-  });
-  
-  socket.on('disconnect', function (reason) {
-    if(reason == "booted"){
-      pad.collabClient.setChannelState("DISCONNECTED");
-    } else {
-      function disconnectEvent()
-      {
-        pad.collabClient.setChannelState("DISCONNECTED", "reconnect_timeout");
-      }
-      
-      pad.collabClient.setChannelState("RECONNECTING");
-      
-      disconnectTimeout = setTimeout(disconnectEvent, 40000);
-    }
-  });
-
-  var receivedClientVars = false;
-  var initalized = false;
-
-  socket.on('message', function(obj)
-  {
-    //the access was not granted, give the user a message
-    if(!receivedClientVars && obj.accessStatus)
-    {
-      if(obj.accessStatus == "deny")
-      {
-        $("#editorloadingbox").html("<b>You do not have permission to access this pad</b>");
-      }
-      else if(obj.accessStatus == "needPassword")
-      {
-        $("#editorloadingbox").html("<b>You need a password to access this pad</b><br>" +
-                                    "<input id='passwordinput' type='password' name='password'>"+
-                                    "<button type='button' onclick=\"" + padutils.escapeHtml('require('+JSON.stringify(module.id)+").savePassword()") + "\">ok</button>");
-      }
-      else if(obj.accessStatus == "wrongPassword")
-      {
-        $("#editorloadingbox").html("<b>You're password was wrong</b><br>" +
-                                    "<input id='passwordinput' type='password' name='password'>"+
-                                    "<button type='button' onclick=\"" + padutils.escapeHtml('require('+JSON.stringify(module.id)+").savePassword()") + "\">ok</button>");
-      }
-    }
-    
-    //if we haven't recieved the clientVars yet, then this message should it be
-    else if (!receivedClientVars)
-    {
-      //log the message
-      if (window.console) console.log(obj);
-
-      receivedClientVars = true;
-
-      //set some client vars
-      clientVars = obj;
-      clientVars.userAgent = "Anonymous";
-      clientVars.collab_client_vars.clientAgent = "Anonymous";
-
-      //initalize the pad
-      pad._afterHandshake();
-      initalized = true;
-
-      // If the LineNumbersDisabled value is set to true then we need to hide the Line Numbers
-      if (settings.LineNumbersDisabled == true)
-      {
-        pad.changeViewOption('showLineNumbers', false);
-      }
-
-      // If the noColors value is set to true then we need to hide the background colors on the ace spans
-      if (settings.noColors == true)
-      {
-        pad.changeViewOption('noColors', true);
-      }
-      
-      if (settings.rtlIsTrue == true)
-      {
-        pad.changeViewOption('rtl', true);
-      }
-
-      // If the Monospacefont value is set to true then change it to monospace.
-      if (settings.useMonospaceFontGlobal == true)
-      {
-        pad.changeViewOption('useMonospaceFont', true);
-      }
-      // if the globalUserName value is set we need to tell the server and the client about the new authorname
-      if (settings.globalUserName !== false)
-      {
-        pad.notifyChangeName(settings.globalUserName); // Notifies the server
-        pad.myUserInfo.name = settings.globalUserName;
-        $('#myusernameedit').attr({"value":settings.globalUserName}); // Updates the current users UI
-      }
-    }
-    //This handles every Message after the clientVars
-    else
-    {
-      //this message advices the client to disconnect
-      if (obj.disconnect)
-      {
-        padconnectionstatus.disconnected(obj.disconnect);
-        socket.disconnect();
-        return;
-      }
-      else
-      {
-        pad.collabClient.handleMessageFromServer(obj);
-      }
-    }
-  });
-  // Bind the colorpicker
-  var fb = $('#colorpicker').farbtastic({ callback: '#mycolorpickerpreview', width: 220});
 }
 
 var pad = {
@@ -699,14 +520,20 @@ var pad = {
       paddocbar.enable();
       padimpexp.enable();
     }
+    else if (newState == "RECONNECTED")
+    {
+      padconnectionstatus.connected();
+      //todo: trigger emmision of waiting queue
+      pad.collabClient.setChannelState("CONNECTED");
+    }
     else if (newState == "RECONNECTING")
     {
       padconnectionstatus.reconnecting();
       
-      padeditor.disable();
+      /*padeditor.disable();
       padeditbar.disable();
       paddocbar.disable();
-      padimpexp.disable();
+      padimpexp.disable();*/
     }
     else if (newState == "DISCONNECTED")
     {
@@ -716,6 +543,7 @@ var pad = {
       
       //we filter non objects from the socket object and put them in the diagnosticInfo 
       //this ensures we have no cyclic data - this allows us to stringify the data
+      //FIXME: move this to an util function
       for(var i in socket.socket)
       {
         var value = socket.socket[i];
